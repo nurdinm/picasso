@@ -1,5 +1,4 @@
 apply plugin: 'com.android.application'
-apply plugin: 'org.jetbrains.kotlin.android'
 
 android {
   compileSdkVersion versions.compileSdk
@@ -8,6 +7,9 @@ android {
     minSdkVersion versions.minSdk
     targetSdkVersion versions.targetSdk
     applicationId 'com.example.picasso'
+
+    versionCode 1
+    versionName '1.0'
   }
 
   compileOptions {
@@ -29,8 +31,5 @@ dependencies {
   compileOnly deps.androidxAnnotations
   implementation deps.androidxCore
   implementation deps.androidxFragment
-  implementation deps.kotlinStdlibJdk8
-
   implementation project(':picasso')
-  implementation project(':picasso-stats')
 }

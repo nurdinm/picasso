@@ -13,24 +13,24 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.squareup.picasso3;
+package com.squareup.picasso;
 
+import androidx.annotation.VisibleForTesting;
 import android.view.View;
 import android.view.View.OnAttachStateChangeListener;
 import android.view.ViewTreeObserver;
 import android.view.ViewTreeObserver.OnPreDrawListener;
 import android.widget.ImageView;
-import androidx.annotation.Nullable;
-import androidx.annotation.VisibleForTesting;
+import java.lang.ref.WeakReference;
 
 class DeferredRequestCreator implements OnPreDrawListener, OnAttachStateChangeListener {
   private final RequestCreator creator;
-  @VisibleForTesting final ImageView target;
-  @VisibleForTesting @Nullable Callback callback;
+  @VisibleForTesting final WeakReference<ImageView> target;
+  @VisibleForTesting Callback callback;
 
-  DeferredRequestCreator(RequestCreator creator, ImageView target, @Nullable Callback callback) {
+  DeferredRequestCreator(RequestCreator creator, ImageView target, Callback callback) {
     this.creator = creator;
-    this.target = target;
+    this.target = new WeakReference<>(target);
     this.callback = callback;
 
     target.addOnAttachStateChangeListener(this);
@@ -51,7 +51,10 @@ class DeferredRequestCreator implements OnPreDrawListener, OnAttachStateChangeLi
   }
 
   @Override public boolean onPreDraw() {
-    ImageView target = this.target;
+    ImageView target = this.target.get();
+    if (target == null) {
+      return true;
+    }
 
     ViewTreeObserver vto = target.getViewTreeObserver();
     if (!vto.isAlive()) {
@@ -67,6 +70,7 @@ class DeferredRequestCreator implements OnPreDrawListener, OnAttachStateChangeLi
 
     target.removeOnAttachStateChangeListener(this);
     vto.removeOnPreDrawListener(this);
+    this.target.clear();
 
     this.creator.unfit().resize(width, height).into(target, callback);
     return true;
@@ -76,6 +80,12 @@ class DeferredRequestCreator implements OnPreDrawListener, OnAttachStateChangeLi
     creator.clearTag();
     callback = null;
 
+    ImageView target = this.target.get();
+    if (target == null) {
+      return;
+    }
+    this.target.clear();
+
     target.removeOnAttachStateChangeListener(this);
 
     ViewTreeObserver vto = target.getViewTreeObserver();
@@ -84,7 +94,7 @@ class DeferredRequestCreator implements OnPreDrawListener, OnAttachStateChangeLi
     }
   }
 
-  @Nullable Object getTag() {
+  Object getTag() {
     return creator.getTag();
   }
 }

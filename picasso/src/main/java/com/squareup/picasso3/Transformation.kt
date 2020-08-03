@@ -13,22 +13,24 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.squareup.picasso3
+package com.squareup.picasso;
 
-import com.squareup.picasso3.RequestHandler.Result
+import androidx.annotation.NonNull;
+import java.io.IOException;
+import okhttp3.Response;
 
-/** Image transformation.  */
-interface Transformation {
+/** A mechanism to load images from external resources such as a disk cache and/or the internet. */
+public interface Downloader {
   /**
-   * Transform the source result into a new result. If you create a new bitmap instance, you must
-   * call [android.graphics.Bitmap.recycle] on `source`. You may return the original
-   * if no transformation is required.
+   * Download the specified image {@code url} from the internet.
+   *
+   * @throws IOException if the requested URL cannot successfully be loaded.
    */
-  fun transform(source: Result.Bitmap): Result.Bitmap
+  @NonNull Response load(@NonNull okhttp3.Request request) throws IOException;
 
   /**
-   * Returns a unique key for the transformation, used for caching purposes. If the transformation
-   * has parameters (e.g. size, scale factor, etc) then these should be part of the key.
+   * Allows to perform a clean up for this {@link Downloader} including closing the disk cache and
+   * other resources.
    */
-  fun key(): String
+  void shutdown();
 }

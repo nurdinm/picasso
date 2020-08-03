@@ -13,8 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.squareup.picasso3;
+package com.squareup.picasso;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Color;
@@ -22,50 +23,46 @@ import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
+import android.os.Process;
 import android.widget.ImageView;
 import android.widget.RemoteViews;
 import androidx.annotation.DrawableRes;
 import androidx.annotation.IdRes;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
-import androidx.lifecycle.Lifecycle;
-import androidx.lifecycle.LifecycleObserver;
-import androidx.lifecycle.OnLifecycleEvent;
-import com.squareup.picasso3.RequestHandler.Result;
-import com.squareup.picasso3.Utils.PicassoThreadFactory;
 import java.io.File;
-import java.io.IOException;
+import java.lang.ref.ReferenceQueue;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.WeakHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.ThreadFactory;
-import okhttp3.Call;
-import okhttp3.OkHttpClient;
 
-import static com.squareup.picasso3.Dispatcher.HUNTER_COMPLETE;
-import static com.squareup.picasso3.Dispatcher.REQUEST_BATCH_RESUME;
-import static com.squareup.picasso3.MemoryPolicy.shouldReadFromMemoryCache;
-import static com.squareup.picasso3.Picasso.LoadedFrom.MEMORY;
-import static com.squareup.picasso3.Utils.OWNER_MAIN;
-import static com.squareup.picasso3.Utils.VERB_COMPLETED;
-import static com.squareup.picasso3.Utils.VERB_ERRORED;
-import static com.squareup.picasso3.Utils.VERB_RESUMED;
-import static com.squareup.picasso3.Utils.calculateDiskCacheSize;
-import static com.squareup.picasso3.Utils.checkMain;
-import static com.squareup.picasso3.Utils.checkNotNull;
-import static com.squareup.picasso3.Utils.createDefaultCacheDir;
-import static com.squareup.picasso3.Utils.log;
+import static android.os.Process.THREAD_PRIORITY_BACKGROUND;
+import static com.squareup.picasso.Action.RequestWeakReference;
+import static com.squareup.picasso.Dispatcher.HUNTER_BATCH_COMPLETE;
+import static com.squareup.picasso.Dispatcher.REQUEST_BATCH_RESUME;
+import static com.squareup.picasso.Dispatcher.REQUEST_GCED;
+import static com.squareup.picasso.MemoryPolicy.shouldReadFromMemoryCache;
+import static com.squareup.picasso.Picasso.LoadedFrom.MEMORY;
+import static com.squareup.picasso.Utils.OWNER_MAIN;
+import static com.squareup.picasso.Utils.THREAD_LEAK_CLEANING_MS;
+import static com.squareup.picasso.Utils.THREAD_PREFIX;
+import static com.squareup.picasso.Utils.VERB_CANCELED;
+import static com.squareup.picasso.Utils.VERB_COMPLETED;
+import static com.squareup.picasso.Utils.VERB_ERRORED;
+import static com.squareup.picasso.Utils.VERB_RESUMED;
+import static com.squareup.picasso.Utils.checkMain;
+import static com.squareup.picasso.Utils.log;
 
 /**
  * Image downloading, transformation, and caching manager.
  * <p>
- * Use {@see PicassoProvider#get()} for a global singleton instance
+ * Use {@link #get()} for the global singleton instance
  * or construct your own instance with {@link Builder}.
  */
-public class Picasso implements LifecycleObserver {
+public class Picasso {
 
   /** Callbacks for Picasso events. */
   public interface Listener {
@@ -73,8 +70,7 @@ public class Picasso implements LifecycleObserver {
      * Invoked when an image has failed to load. This is useful for reporting image failures to a
      * remote analytics service, for example.
      */
-    void onImageLoadFailed(@NonNull Picasso picasso, @NonNull Uri uri,
-        @NonNull Exception exception);
+    void onImageLoadFailed(Picasso picasso, Uri uri, Exception exception);
   }
 
   /**
@@ -83,6 +79,9 @@ public class Picasso implements LifecycleObserver {
    * <p>
    * For example, if you use a CDN you can change the hostname for the image based on the current
    * location of the user in order to get faster download speeds.
+   * <p>
+   * <b>NOTE:</b> This is a beta feature. The API is subject to change in a backwards incompatible
+   * way at any time.
    */
   public interface RequestTransformer {
     /**
@@ -90,7 +89,14 @@ public class Picasso implements LifecycleObserver {
      *
      * @return The original request or a new request to replace it. Must not be null.
      */
-    @NonNull Request transformRequest(@NonNull Request request);
+    Request transformRequest(Request request);
+
+    /** A {@link RequestTransformer} which returns the original request. */
+    RequestTransformer IDENTITY = new RequestTransformer() {
+      @Override public Request transformRequest(Request request) {
+        return request;
+      }
+    };
   }
 
   /**
@@ -101,20 +107,28 @@ public class Picasso implements LifecycleObserver {
   public enum Priority {
     LOW,
     NORMAL,
-    /**
-     * High priority requests will post to the front of main thread's message queue when
-     * they complete loading and their images need to be rendered.
-     */
     HIGH
   }
 
-  public static final String TAG = "Picasso";
+  static final String TAG = "Picasso";
   static final Handler HANDLER = new Handler(Looper.getMainLooper()) {
     @Override public void handleMessage(Message msg) {
       switch (msg.what) {
-        case HUNTER_COMPLETE: {
-          BitmapHunter hunter = (BitmapHunter) msg.obj;
-          hunter.picasso.complete(hunter);
+        case HUNTER_BATCH_COMPLETE: {
+          @SuppressWarnings("unchecked") List<BitmapHunter> batch = (List<BitmapHunter>) msg.obj;
+          //noinspection ForLoopReplaceableByForEach
+          for (int i = 0, n = batch.size(); i < n; i++) {
+            BitmapHunter hunter = batch.get(i);
+            hunter.picasso.complete(hunter);
+          }
+          break;
+        }
+        case REQUEST_GCED: {
+          Action action = (Action) msg.obj;
+          if (action.getPicasso().loggingEnabled) {
+            log(OWNER_MAIN, VERB_CANCELED, action.request.logId(), "target got garbage collected");
+          }
+          action.picasso.cancelExistingRequest(action.getTarget());
           break;
         }
         case REQUEST_BATCH_RESUME:
@@ -131,97 +145,81 @@ public class Picasso implements LifecycleObserver {
     }
   };
 
-  @Nullable final Listener listener;
-  final List<RequestTransformer> requestTransformers;
-  final List<RequestHandler> requestHandlers;
-  final List<EventListener> eventListeners;
+  @SuppressLint("StaticFieldLeak") static volatile Picasso singleton = null;
+
+  private final Listener listener;
+  private final RequestTransformer requestTransformer;
+  private final CleanupThread cleanupThread;
+  private final List<RequestHandler> requestHandlers;
 
   final Context context;
   final Dispatcher dispatcher;
-  final Call.Factory callFactory;
-  private final @Nullable okhttp3.Cache closeableCache;
-  final PlatformLruCache cache;
+  final Cache cache;
+  final Stats stats;
   final Map<Object, Action> targetToAction;
   final Map<ImageView, DeferredRequestCreator> targetToDeferredRequestCreator;
-  @Nullable final Bitmap.Config defaultBitmapConfig;
+  final ReferenceQueue<Object> referenceQueue;
+  final Bitmap.Config defaultBitmapConfig;
 
   boolean indicatorsEnabled;
   volatile boolean loggingEnabled;
 
   boolean shutdown;
 
-  Picasso(Context context, Dispatcher dispatcher, Call.Factory callFactory,
-      @Nullable okhttp3.Cache closeableCache, PlatformLruCache cache, @Nullable Listener listener,
-      List<RequestTransformer> requestTransformers, List<RequestHandler> extraRequestHandlers,
-      List<? extends EventListener> eventListeners, @Nullable Bitmap.Config defaultBitmapConfig,
-      boolean indicatorsEnabled, boolean loggingEnabled) {
+  Picasso(Context context, Dispatcher dispatcher, Cache cache, Listener listener,
+      RequestTransformer requestTransformer, List<RequestHandler> extraRequestHandlers, Stats stats,
+      Bitmap.Config defaultBitmapConfig, boolean indicatorsEnabled, boolean loggingEnabled) {
     this.context = context;
     this.dispatcher = dispatcher;
-    this.callFactory = callFactory;
-    this.closeableCache = closeableCache;
     this.cache = cache;
     this.listener = listener;
-    this.requestTransformers = Collections.unmodifiableList(new ArrayList<>(requestTransformers));
+    this.requestTransformer = requestTransformer;
     this.defaultBitmapConfig = defaultBitmapConfig;
 
-    // Adjust this and Builder(Picasso) as internal handlers are added or removed.
-    int builtInHandlers = 8;
-    int extraCount = extraRequestHandlers.size();
+    int builtInHandlers = 7; // Adjust this as internal handlers are added or removed.
+    int extraCount = (extraRequestHandlers != null ? extraRequestHandlers.size() : 0);
     List<RequestHandler> allRequestHandlers = new ArrayList<>(builtInHandlers + extraCount);
 
     // ResourceRequestHandler needs to be the first in the list to avoid
     // forcing other RequestHandlers to perform null checks on request.uri
     // to cover the (request.resourceId != 0) case.
-    allRequestHandlers.add(ResourceDrawableRequestHandler.create(context));
     allRequestHandlers.add(new ResourceRequestHandler(context));
-    allRequestHandlers.addAll(extraRequestHandlers);
+    if (extraRequestHandlers != null) {
+      allRequestHandlers.addAll(extraRequestHandlers);
+    }
     allRequestHandlers.add(new ContactsPhotoRequestHandler(context));
     allRequestHandlers.add(new MediaStoreRequestHandler(context));
     allRequestHandlers.add(new ContentStreamRequestHandler(context));
     allRequestHandlers.add(new AssetRequestHandler(context));
     allRequestHandlers.add(new FileRequestHandler(context));
-    allRequestHandlers.add(new NetworkRequestHandler(callFactory));
+    allRequestHandlers.add(new NetworkRequestHandler(dispatcher.downloader, stats));
     requestHandlers = Collections.unmodifiableList(allRequestHandlers);
 
-    this.eventListeners = Collections.unmodifiableList(eventListeners);
-
-    this.targetToAction = new LinkedHashMap<>();
-    this.targetToDeferredRequestCreator = new LinkedHashMap<>();
+    this.stats = stats;
+    this.targetToAction = new WeakHashMap<>();
+    this.targetToDeferredRequestCreator = new WeakHashMap<>();
     this.indicatorsEnabled = indicatorsEnabled;
     this.loggingEnabled = loggingEnabled;
-  }
-
-  @OnLifecycleEvent(Lifecycle.Event.ON_DESTROY)
-  void cancelAll() {
-    checkMain();
-
-    List<Action> actions = new ArrayList<>(targetToAction.values());
-    //noinspection ForLoopReplaceableByForEach
-    for (int i = 0, n = actions.size(); i < n; i++) {
-      Action action = actions.get(i);
-      cancelExistingRequest(action.getTarget());
-    }
-
-    List<DeferredRequestCreator> deferredRequestCreators =
-        new ArrayList<>(targetToDeferredRequestCreator.values());
-    //noinspection ForLoopReplaceableByForEach
-    for (int i = 0, n = deferredRequestCreators.size(); i < n; i++) {
-      DeferredRequestCreator deferredRequestCreator = deferredRequestCreators.get(i);
-      deferredRequestCreator.cancel();
-    }
+    this.referenceQueue = new ReferenceQueue<>();
+    this.cleanupThread = new CleanupThread(referenceQueue, HANDLER);
+    this.cleanupThread.start();
   }
 
   /** Cancel any existing requests for the specified target {@link ImageView}. */
   public void cancelRequest(@NonNull ImageView view) {
     // checkMain() is called from cancelExistingRequest()
-    checkNotNull(view, "view == null");
+    if (view == null) {
+      throw new IllegalArgumentException("view cannot be null.");
+    }
     cancelExistingRequest(view);
   }
 
-  /** Cancel any existing requests for the specified {@link BitmapTarget} instance. */
-  public void cancelRequest(@NonNull BitmapTarget target) {
+  /** Cancel any existing requests for the specified {@link Target} instance. */
+  public void cancelRequest(@NonNull Target target) {
     // checkMain() is called from cancelExistingRequest()
-    checkNotNull(target, "target == null");
+    if (target == null) {
+      throw new IllegalArgumentException("target cannot be null.");
+    }
     cancelExistingRequest(target);
   }
 
@@ -231,7 +229,9 @@ public class Picasso implements LifecycleObserver {
    */
   public void cancelRequest(@NonNull RemoteViews remoteViews, @IdRes int viewId) {
     // checkMain() is called from cancelExistingRequest()
-    checkNotNull(remoteViews, "remoteViews == null");
+    if (remoteViews == null) {
+      throw new IllegalArgumentException("remoteViews cannot be null.");
+    }
     cancelExistingRequest(new RemoteViewsAction.RemoteViewsTarget(remoteViews, viewId));
   }
 
@@ -243,7 +243,9 @@ public class Picasso implements LifecycleObserver {
    */
   public void cancelTag(@NonNull Object tag) {
     checkMain();
-    checkNotNull(tag, "tag == null");
+    if (tag == null) {
+      throw new IllegalArgumentException("Cannot cancel requests with null tag.");
+    }
 
     List<Action> actions = new ArrayList<>(targetToAction.values());
     //noinspection ForLoopReplaceableByForEach
@@ -265,29 +267,6 @@ public class Picasso implements LifecycleObserver {
     }
   }
 
-  @OnLifecycleEvent(Lifecycle.Event.ON_STOP)
-  void pauseAll() {
-    checkMain();
-
-    List<Action> actions = new ArrayList<>(targetToAction.values());
-    //noinspection ForLoopReplaceableByForEach
-    for (int i = 0, n = actions.size(); i < n; i++) {
-      Action action = actions.get(i);
-      dispatcher.dispatchPauseTag(action.getTag());
-    }
-
-    List<DeferredRequestCreator> deferredRequestCreators =
-        new ArrayList<>(targetToDeferredRequestCreator.values());
-    //noinspection ForLoopReplaceableByForEach
-    for (int i = 0, n = deferredRequestCreators.size(); i < n; i++) {
-      DeferredRequestCreator deferredRequestCreator = deferredRequestCreators.get(i);
-      Object tag = deferredRequestCreator.getTag();
-      if (tag != null) {
-        dispatcher.dispatchPauseTag(tag);
-      }
-    }
-  }
-
   /**
    * Pause existing requests with the given tag. Use {@link #resumeTag(Object)}
    * to resume requests with the given tag.
@@ -296,31 +275,10 @@ public class Picasso implements LifecycleObserver {
    * @see RequestCreator#tag(Object)
    */
   public void pauseTag(@NonNull Object tag) {
-    checkNotNull(tag, "tag == null");
+    if (tag == null) {
+      throw new IllegalArgumentException("tag == null");
+    }
     dispatcher.dispatchPauseTag(tag);
-  }
-
-  @OnLifecycleEvent(Lifecycle.Event.ON_START)
-  void resumeAll() {
-    checkMain();
-
-    List<Action> actions = new ArrayList<>(targetToAction.values());
-    //noinspection ForLoopReplaceableByForEach
-    for (int i = 0, n = actions.size(); i < n; i++) {
-      Action action = actions.get(i);
-      dispatcher.dispatchResumeTag(action.getTag());
-    }
-
-    List<DeferredRequestCreator> deferredRequestCreators =
-        new ArrayList<>(targetToDeferredRequestCreator.values());
-    //noinspection ForLoopReplaceableByForEach
-    for (int i = 0, n = deferredRequestCreators.size(); i < n; i++) {
-      DeferredRequestCreator deferredRequestCreator = deferredRequestCreators.get(i);
-      Object tag = deferredRequestCreator.getTag();
-      if (tag != null) {
-        dispatcher.dispatchResumeTag(tag);
-      }
-    }
   }
 
   /**
@@ -331,7 +289,9 @@ public class Picasso implements LifecycleObserver {
    * @see RequestCreator#tag(Object)
    */
   public void resumeTag(@NonNull Object tag) {
-    checkNotNull(tag, "tag == null");
+    if (tag == null) {
+      throw new IllegalArgumentException("tag == null");
+    }
     dispatcher.dispatchResumeTag(tag);
   }
 
@@ -345,7 +305,6 @@ public class Picasso implements LifecycleObserver {
    * @see #load(String)
    * @see #load(int)
    */
-  @NonNull
   public RequestCreator load(@Nullable Uri uri) {
     return new RequestCreator(this, uri, 0);
   }
@@ -360,12 +319,11 @@ public class Picasso implements LifecycleObserver {
    * Passing {@code null} as a {@code path} will not trigger any request but will set a
    * placeholder, if one is specified.
    *
-   * @throws IllegalArgumentException if {@code path} is empty or blank string.
    * @see #load(Uri)
    * @see #load(File)
    * @see #load(int)
+   * @throws IllegalArgumentException if {@code path} is empty or blank string.
    */
-  @NonNull
   public RequestCreator load(@Nullable String path) {
     if (path == null) {
       return new RequestCreator(this, null, 0);
@@ -389,8 +347,7 @@ public class Picasso implements LifecycleObserver {
    * @see #load(String)
    * @see #load(int)
    */
-  @NonNull
-  public RequestCreator load(@Nullable File file) {
+  public RequestCreator load(@NonNull File file) {
     if (file == null) {
       return new RequestCreator(this, null, 0);
     }
@@ -404,19 +361,11 @@ public class Picasso implements LifecycleObserver {
    * @see #load(String)
    * @see #load(File)
    */
-  @NonNull
   public RequestCreator load(@DrawableRes int resourceId) {
     if (resourceId == 0) {
       throw new IllegalArgumentException("Resource ID must not be zero.");
     }
     return new RequestCreator(this, null, resourceId);
-  }
-
-  /**
-   * Clear all the bitmaps from the memory cache.
-   */
-  public void evictAll() {
-    cache.clear();
   }
 
   /**
@@ -451,7 +400,9 @@ public class Picasso implements LifecycleObserver {
    * @see #invalidate(String)
    */
   public void invalidate(@NonNull File file) {
-    checkNotNull(file, "file == null");
+    if (file == null) {
+      throw new IllegalArgumentException("file == null");
+    }
     invalidate(Uri.fromFile(file));
   }
 
@@ -461,7 +412,7 @@ public class Picasso implements LifecycleObserver {
   }
 
   /** {@code true} if debug indicators should are displayed on images. */
-  @SuppressWarnings("UnusedDeclaration") public boolean getIndicatorsEnabled() {
+  @SuppressWarnings("UnusedDeclaration") public boolean areIndicatorsEnabled() {
     return indicatorsEnabled;
   }
 
@@ -481,22 +432,28 @@ public class Picasso implements LifecycleObserver {
     return loggingEnabled;
   }
 
+  /**
+   * Creates a {@link StatsSnapshot} of the current stats for this instance.
+   * <p>
+   * <b>NOTE:</b> The snapshot may not always be completely up-to-date if requests are still in
+   * progress.
+   */
+  @SuppressWarnings("UnusedDeclaration") public StatsSnapshot getSnapshot() {
+    return stats.createSnapshot();
+  }
+
   /** Stops this instance from accepting further requests. */
   public void shutdown() {
+    if (this == singleton) {
+      throw new UnsupportedOperationException("Default singleton instance cannot be shutdown.");
+    }
     if (shutdown) {
       return;
     }
     cache.clear();
-
-    close();
-
+    cleanupThread.shutdown();
+    stats.shutdown();
     dispatcher.shutdown();
-    if (closeableCache != null) {
-      try {
-        closeableCache.close();
-      } catch (IOException ignored) {
-      }
-    }
     for (DeferredRequestCreator deferredRequestCreator : targetToDeferredRequestCreator.values()) {
       deferredRequestCreator.cancel();
     }
@@ -509,19 +466,14 @@ public class Picasso implements LifecycleObserver {
   }
 
   Request transformRequest(Request request) {
-    for (int i = 0, size = requestTransformers.size(); i < size; i++) {
-      RequestTransformer transformer = requestTransformers.get(i);
-      Request transformed = transformer.transformRequest(request);
-      if (transformed == null) {
-        throw new IllegalStateException("Request transformer "
-            + transformer.getClass().getCanonicalName()
-            + " returned null for "
-            + request);
-      }
-      request = transformed;
+    Request transformed = requestTransformer.transformRequest(request);
+    if (transformed == null) {
+      throw new IllegalStateException("Request transformer "
+          + requestTransformer.getClass().getCanonicalName()
+          + " returned null for "
+          + request);
     }
-
-    return request;
+    return transformed;
   }
 
   void defer(ImageView view, DeferredRequestCreator request) {
@@ -534,7 +486,7 @@ public class Picasso implements LifecycleObserver {
 
   void enqueueAndSubmit(Action action) {
     Object target = action.getTarget();
-    if (targetToAction.get(target) != action) {
+    if (target != null && targetToAction.get(target) != action) {
       // This will also check we are on the main thread.
       cancelExistingRequest(target);
       targetToAction.put(target, action);
@@ -546,12 +498,12 @@ public class Picasso implements LifecycleObserver {
     dispatcher.dispatchSubmit(action);
   }
 
-  @Nullable Bitmap quickMemoryCacheCheck(String key) {
+  Bitmap quickMemoryCacheCheck(String key) {
     Bitmap cached = cache.get(key);
     if (cached != null) {
-      cacheHit();
+      stats.dispatchCacheHit();
     } else {
-      cacheMiss();
+      stats.dispatchCacheMiss();
     }
     return cached;
   }
@@ -567,19 +519,20 @@ public class Picasso implements LifecycleObserver {
       return;
     }
 
-    Uri uri = checkNotNull(hunter.data.uri, "uri == null");
+    Uri uri = hunter.getData().uri;
     Exception exception = hunter.getException();
-    Result result = hunter.getResult();
+    Bitmap result = hunter.getResult();
+    LoadedFrom from = hunter.getLoadedFrom();
 
     if (single != null) {
-      deliverAction(result, single, exception);
+      deliverAction(result, from, single, exception);
     }
 
-    if (joined != null) {
+    if (hasMultiple) {
       //noinspection ForLoopReplaceableByForEach
       for (int i = 0, n = joined.size(); i < n; i++) {
         Action join = joined.get(i);
-        deliverAction(result, join, exception);
+        deliverAction(result, from, join, exception);
       }
     }
 
@@ -590,13 +543,13 @@ public class Picasso implements LifecycleObserver {
 
   void resumeAction(Action action) {
     Bitmap bitmap = null;
-    if (shouldReadFromMemoryCache(action.request.memoryPolicy)) {
-      bitmap = quickMemoryCacheCheck(action.request.key);
+    if (shouldReadFromMemoryCache(action.memoryPolicy)) {
+      bitmap = quickMemoryCacheCheck(action.getKey());
     }
 
     if (bitmap != null) {
       // Resumed action is cached, complete immediately.
-      deliverAction(new Result.Bitmap(bitmap, MEMORY), action, null);
+      deliverAction(bitmap, MEMORY, action, null);
       if (loggingEnabled) {
         log(OWNER_MAIN, VERB_COMPLETED, action.request.logId(), "from " + MEMORY);
       }
@@ -609,24 +562,25 @@ public class Picasso implements LifecycleObserver {
     }
   }
 
-  private void deliverAction(@Nullable Result result, Action action,
-      @Nullable Exception e) {
-    if (action.cancelled) {
+  private void deliverAction(Bitmap result, LoadedFrom from, Action action, Exception e) {
+    if (action.isCancelled()) {
       return;
     }
-    if (!action.willReplay) {
+    if (!action.willReplay()) {
       targetToAction.remove(action.getTarget());
     }
     if (result != null) {
-      action.complete(result);
+      if (from == null) {
+        throw new AssertionError("LoadedFrom cannot be null.");
+      }
+      action.complete(result, from);
       if (loggingEnabled) {
-        log(OWNER_MAIN, VERB_COMPLETED, action.request.logId(), "from " + result.loadedFrom);
+        log(OWNER_MAIN, VERB_COMPLETED, action.request.logId(), "from " + from);
       }
     } else {
-      Exception exception = checkNotNull(e, "e == null");
-      action.error(exception);
+      action.error(e);
       if (loggingEnabled) {
-        log(OWNER_MAIN, VERB_ERRORED, action.request.logId(), exception.getMessage());
+        log(OWNER_MAIN, VERB_ERRORED, action.request.logId(), e.getMessage());
       }
     }
   }
@@ -648,82 +602,152 @@ public class Picasso implements LifecycleObserver {
     }
   }
 
-  @NonNull
-  public Builder newBuilder() {
-    return new Builder(this);
+  /**
+   * When the target of an action is weakly reachable but the request hasn't been canceled, it
+   * gets added to the reference queue. This thread empties the reference queue and cancels the
+   * request.
+   */
+  private static class CleanupThread extends Thread {
+    private final ReferenceQueue<Object> referenceQueue;
+    private final Handler handler;
+
+    CleanupThread(ReferenceQueue<Object> referenceQueue, Handler handler) {
+      this.referenceQueue = referenceQueue;
+      this.handler = handler;
+      setDaemon(true);
+      setName(THREAD_PREFIX + "refQueue");
+    }
+
+    @Override public void run() {
+      Process.setThreadPriority(THREAD_PRIORITY_BACKGROUND);
+      while (true) {
+        try {
+          // Prior to Android 5.0, even when there is no local variable, the result from
+          // remove() & obtainMessage() is kept as a stack local variable.
+          // We're forcing this reference to be cleared and replaced by looping every second
+          // when there is nothing to do.
+          // This behavior has been tested and reproduced with heap dumps.
+          RequestWeakReference<?> remove =
+              (RequestWeakReference<?>) referenceQueue.remove(THREAD_LEAK_CLEANING_MS);
+          Message message = handler.obtainMessage();
+          if (remove != null) {
+            message.what = REQUEST_GCED;
+            message.obj = remove.action;
+            handler.sendMessage(message);
+          } else {
+            message.recycle();
+          }
+        } catch (InterruptedException e) {
+          break;
+        } catch (final Exception e) {
+          handler.post(new Runnable() {
+            @Override public void run() {
+              throw new RuntimeException(e);
+            }
+          });
+          break;
+        }
+      }
+    }
+
+    void shutdown() {
+      interrupt();
+    }
+  }
+
+  /**
+   * The global {@link Picasso} instance.
+   * <p>
+   * This instance is automatically initialized with defaults that are suitable to most
+   * implementations.
+   * <ul>
+   * <li>LRU memory cache of 15% the available application RAM</li>
+   * <li>Disk cache of 2% storage space up to 50MB but no less than 5MB. (Note: this is only
+   * available on API 14+ <em>or</em> if you are using a standalone library that provides a disk
+   * cache on all API levels like OkHttp)</li>
+   * <li>Three download threads for disk and network access.</li>
+   * </ul>
+   * <p>
+   * If these settings do not meet the requirements of your application you can construct your own
+   * with full control over the configuration by using {@link Picasso.Builder} to create a
+   * {@link Picasso} instance. You can either use this directly or by setting it as the global
+   * instance with {@link #setSingletonInstance}.
+   */
+  public static Picasso get() {
+    if (singleton == null) {
+      synchronized (Picasso.class) {
+        if (singleton == null) {
+          if (PicassoProvider.context == null) {
+            throw new IllegalStateException("context == null");
+          }
+          singleton = new Builder(PicassoProvider.context).build();
+        }
+      }
+    }
+    return singleton;
+  }
+
+  /**
+   * Set the global instance returned from {@link #get}.
+   * <p>
+   * This method must be called before any calls to {@link #get} and may only be called once.
+   */
+  public static void setSingletonInstance(@NonNull Picasso picasso) {
+    if (picasso == null) {
+      throw new IllegalArgumentException("Picasso must not be null.");
+    }
+    synchronized (Picasso.class) {
+      if (singleton != null) {
+        throw new IllegalStateException("Singleton instance already exists.");
+      }
+      singleton = picasso;
+    }
   }
 
   /** Fluent API for creating {@link Picasso} instances. */
   @SuppressWarnings("UnusedDeclaration") // Public API.
   public static class Builder {
     private final Context context;
-    @Nullable private Call.Factory callFactory;
-    @Nullable private ExecutorService service;
-    @Nullable private PlatformLruCache cache;
-    @Nullable private Listener listener;
-    private final List<RequestTransformer> requestTransformers = new ArrayList<>();
-    private final List<RequestHandler> requestHandlers = new ArrayList<>();
-    private final List<EventListener> eventListeners = new ArrayList<>();
-    @Nullable private Bitmap.Config defaultBitmapConfig;
+    private Downloader downloader;
+    private ExecutorService service;
+    private Cache cache;
+    private Listener listener;
+    private RequestTransformer transformer;
+    private List<RequestHandler> requestHandlers;
+    private Bitmap.Config defaultBitmapConfig;
 
     private boolean indicatorsEnabled;
     private boolean loggingEnabled;
 
     /** Start building a new {@link Picasso} instance. */
     public Builder(@NonNull Context context) {
-      checkNotNull(context, "context == null");
+      if (context == null) {
+        throw new IllegalArgumentException("Context must not be null.");
+      }
       this.context = context.getApplicationContext();
-    }
-
-    Builder(Picasso picasso) {
-      context = picasso.context;
-      callFactory = picasso.callFactory;
-      service = picasso.dispatcher.service;
-      cache = picasso.cache;
-      listener = picasso.listener;
-      requestTransformers.addAll(picasso.requestTransformers);
-      // See Picasso(). Removes internal request handlers added before and after custom handlers.
-      int numRequestHandlers = picasso.requestHandlers.size();
-      requestHandlers.addAll(picasso.requestHandlers.subList(2, numRequestHandlers - 6));
-      eventListeners.addAll(picasso.eventListeners);
-
-      defaultBitmapConfig = picasso.defaultBitmapConfig;
-      indicatorsEnabled = picasso.indicatorsEnabled;
-      loggingEnabled = picasso.loggingEnabled;
     }
 
     /**
      * Specify the default {@link Bitmap.Config} used when decoding images. This can be overridden
      * on a per-request basis using {@link RequestCreator#config(Bitmap.Config) config(..)}.
      */
-    @NonNull
     public Builder defaultBitmapConfig(@NonNull Bitmap.Config bitmapConfig) {
-      checkNotNull(bitmapConfig, "bitmapConfig == null");
+      if (bitmapConfig == null) {
+        throw new IllegalArgumentException("Bitmap config must not be null.");
+      }
       this.defaultBitmapConfig = bitmapConfig;
       return this;
     }
 
-    /**
-     * Specify the HTTP client to be used for network requests.
-     * <p>
-     * Note: Calling {@link #callFactory} overwrites this value.
-     */
-    @NonNull
-    public Builder client(@NonNull OkHttpClient client) {
-      checkNotNull(client, "client == null");
-      callFactory = client;
-      return this;
-    }
-
-    /**
-     * Specify the call factory to be used for network requests.
-     * <p>
-     * Note: Calling {@link #client} overwrites this value.
-     */
-    @NonNull
-    public Builder callFactory(@NonNull Call.Factory factory) {
-      checkNotNull(factory, "factory == null");
-      callFactory = factory;
+    /** Specify the {@link Downloader} that will be used for downloading images. */
+    public Builder downloader(@NonNull Downloader downloader) {
+      if (downloader == null) {
+        throw new IllegalArgumentException("Downloader must not be null.");
+      }
+      if (this.downloader != null) {
+        throw new IllegalStateException("Downloader already set.");
+      }
+      this.downloader = downloader;
       return this;
     }
 
@@ -731,74 +755,75 @@ public class Picasso implements LifecycleObserver {
      * Specify the executor service for loading images in the background.
      * <p>
      * Note: Calling {@link Picasso#shutdown() shutdown()} will not shutdown supplied executors.
-     * Note: Calling {@link #threadFactory(ThreadFactory)} overwrites this value.
      */
-    @NonNull
     public Builder executor(@NonNull ExecutorService executorService) {
-      checkNotNull(executorService, "executorService == null");
+      if (executorService == null) {
+        throw new IllegalArgumentException("Executor service must not be null.");
+      }
+      if (this.service != null) {
+        throw new IllegalStateException("Executor service already set.");
+      }
       this.service = executorService;
       return this;
     }
 
-    /**
-     * Specify the the thread factory for loading images in the background.
-     * <p>
-     * Note: Calling {@link #executor(ExecutorService)} overwrites this value.
-     */
-    @NonNull
-    public Builder threadFactory(@NonNull ThreadFactory threadFactory) {
-      checkNotNull(threadFactory, "threadFactory == null");
-      service = new PicassoExecutorService(threadFactory);
-      return this;
-    }
-
-    /**
-     * Specify the memory cache size in bytes to use for the most recent images.
-     * A size of 0 disables in-memory caching.
-     */
-    @NonNull
-    public Builder withCacheSize(int maxByteCount) {
-      if (maxByteCount < 0) {
-        throw new IllegalArgumentException("maxByteCount < 0: " + maxByteCount);
+    /** Specify the memory cache used for the most recent images. */
+    public Builder memoryCache(@NonNull Cache memoryCache) {
+      if (memoryCache == null) {
+        throw new IllegalArgumentException("Memory cache must not be null.");
       }
-      cache = new PlatformLruCache(maxByteCount);
+      if (this.cache != null) {
+        throw new IllegalStateException("Memory cache already set.");
+      }
+      this.cache = memoryCache;
       return this;
     }
 
     /** Specify a listener for interesting events. */
-    @NonNull
     public Builder listener(@NonNull Listener listener) {
-      checkNotNull(listener, "listener == null");
+      if (listener == null) {
+        throw new IllegalArgumentException("Listener must not be null.");
+      }
+      if (this.listener != null) {
+        throw new IllegalStateException("Listener already set.");
+      }
       this.listener = listener;
       return this;
     }
 
-    /** Add a transformer that observes and potentially modify all incoming requests. */
-    @NonNull
-    public Builder addRequestTransformer(@NonNull RequestTransformer transformer) {
-      checkNotNull(transformer, "transformer == null");
-      requestTransformers.add(transformer);
+    /**
+     * Specify a transformer for all incoming requests.
+     * <p>
+     * <b>NOTE:</b> This is a beta feature. The API is subject to change in a backwards incompatible
+     * way at any time.
+     */
+    public Builder requestTransformer(@NonNull RequestTransformer transformer) {
+      if (transformer == null) {
+        throw new IllegalArgumentException("Transformer must not be null.");
+      }
+      if (this.transformer != null) {
+        throw new IllegalStateException("Transformer already set.");
+      }
+      this.transformer = transformer;
       return this;
     }
 
     /** Register a {@link RequestHandler}. */
-    @NonNull
     public Builder addRequestHandler(@NonNull RequestHandler requestHandler) {
-      checkNotNull(requestHandler, "requestHandler == null");
+      if (requestHandler == null) {
+        throw new IllegalArgumentException("RequestHandler must not be null.");
+      }
+      if (requestHandlers == null) {
+        requestHandlers = new ArrayList<>();
+      }
+      if (requestHandlers.contains(requestHandler)) {
+        throw new IllegalStateException("RequestHandler already registered.");
+      }
       requestHandlers.add(requestHandler);
       return this;
     }
 
-    /** Register a {@link EventListener}. */
-    @NonNull
-    public Builder addEventListener(@NonNull EventListener eventListener) {
-      checkNotNull(eventListener, "eventListener == null");
-      eventListeners.add(eventListener);
-      return this;
-    }
-
     /** Toggle whether to display debug indicators on images. */
-    @NonNull
     public Builder indicatorsEnabled(boolean enabled) {
       this.indicatorsEnabled = enabled;
       return this;
@@ -810,38 +835,34 @@ public class Picasso implements LifecycleObserver {
      * <b>WARNING:</b> Enabling this will result in excessive object allocation. This should be only
      * be used for debugging purposes. Do NOT pass {@code BuildConfig.DEBUG}.
      */
-    @NonNull
     public Builder loggingEnabled(boolean enabled) {
       this.loggingEnabled = enabled;
       return this;
     }
 
     /** Create the {@link Picasso} instance. */
-    @NonNull
     public Picasso build() {
       Context context = this.context;
 
-      okhttp3.Cache unsharedCache = null;
-      if (callFactory == null) {
-        File cacheDir = createDefaultCacheDir(context);
-        long maxSize = calculateDiskCacheSize(cacheDir);
-        unsharedCache = new okhttp3.Cache(cacheDir, maxSize);
-        callFactory = new OkHttpClient.Builder()
-            .cache(unsharedCache)
-            .build();
+      if (downloader == null) {
+        downloader = new OkHttp3Downloader(context);
       }
       if (cache == null) {
-        cache = new PlatformLruCache(Utils.calculateMemoryCacheSize(context));
+        cache = new LruCache(context);
       }
       if (service == null) {
-        service = new PicassoExecutorService(new PicassoThreadFactory());
+        service = new PicassoExecutorService();
+      }
+      if (transformer == null) {
+        transformer = RequestTransformer.IDENTITY;
       }
 
-      Dispatcher dispatcher = new Dispatcher(context, service, HANDLER, cache);
+      Stats stats = new Stats(cache);
 
-      return new Picasso(context, dispatcher, callFactory, unsharedCache, cache, listener,
-          requestTransformers, requestHandlers, eventListeners, defaultBitmapConfig,
-          indicatorsEnabled, loggingEnabled);
+      Dispatcher dispatcher = new Dispatcher(context, service, HANDLER, downloader, cache, stats);
+
+      return new Picasso(context, dispatcher, cache, listener, transformer, requestHandlers, stats,
+          defaultBitmapConfig, indicatorsEnabled, loggingEnabled);
     }
   }
 
@@ -855,70 +876,6 @@ public class Picasso implements LifecycleObserver {
 
     LoadedFrom(int debugColor) {
       this.debugColor = debugColor;
-    }
-  }
-
-  void cacheMaxSize(int maxSize) {
-    int numListeners = eventListeners.size();
-    for (int i = 0; i < numListeners; i++) {
-      EventListener listener = eventListeners.get(i);
-      listener.cacheMaxSize(maxSize);
-    }
-  }
-
-  void cacheSize(int size) {
-    int numListeners = eventListeners.size();
-    for (int i = 0; i < numListeners; i++) {
-      EventListener listener = eventListeners.get(i);
-      listener.cacheSize(size);
-    }
-  }
-
-  void cacheHit() {
-    int numListeners = eventListeners.size();
-    for (int i = 0; i < numListeners; i++) {
-      EventListener listener = eventListeners.get(i);
-      listener.cacheHit();
-    }
-  }
-
-  void cacheMiss() {
-    int numListeners = eventListeners.size();
-    for (int i = 0; i < numListeners; i++) {
-      EventListener listener = eventListeners.get(i);
-      listener.cacheMiss();
-    }
-  }
-
-  void downloadFinished(long size) {
-    int numListeners = eventListeners.size();
-    for (int i = 0; i < numListeners; i++) {
-      EventListener listener = eventListeners.get(i);
-      listener.downloadFinished(size);
-    }
-  }
-
-  void bitmapDecoded(@NonNull Bitmap bitmap) {
-    int numListeners = eventListeners.size();
-    for (int i = 0; i < numListeners; i++) {
-      EventListener listener = eventListeners.get(i);
-      listener.bitmapDecoded(bitmap);
-    }
-  }
-
-  void bitmapTransformed(@NonNull Bitmap bitmap) {
-    int numListeners = eventListeners.size();
-    for (int i = 0; i < numListeners; i++) {
-      EventListener listener = eventListeners.get(i);
-      listener.bitmapTransformed(bitmap);
-    }
-  }
-
-  void close() {
-    int numListeners = eventListeners.size();
-    for (int i = 0; i < numListeners; i++) {
-      EventListener listener = eventListeners.get(i);
-      listener.close();
     }
   }
 }

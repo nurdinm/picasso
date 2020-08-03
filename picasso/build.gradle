@@ -1,5 +1,4 @@
 apply plugin: 'com.android.library'
-apply plugin: 'org.jetbrains.kotlin.android'
 
 android {
   compileSdkVersion versions.compileSdk
@@ -17,29 +16,19 @@ android {
   lintOptions {
     textOutput 'stdout'
     textReport true
-    lintConfig rootProject.file('lint.xml')
-  }
-
-  testOptions {
-    unitTests {
-      includeAndroidResources = true
-    }
+    lintConfig file('lint.xml')
   }
 }
 
 dependencies {
   api deps.okhttp
-  api deps.okio
-  api deps.androidxLifecycle
   implementation deps.androidxAnnotations
-  implementation deps.androidxCore
   implementation deps.androidxExifInterface
-  implementation deps.kotlinStdlibJdk8
-
   testImplementation deps.junit
   testImplementation deps.truth
-
-  annotationProcessor deps.nullaway
+  testImplementation deps.robolectric
+  testImplementation deps.mockito
+  testImplementation deps.mockWebServer
 }
 
 apply from: rootProject.file('gradle/gradle-mvn-push.gradle')
