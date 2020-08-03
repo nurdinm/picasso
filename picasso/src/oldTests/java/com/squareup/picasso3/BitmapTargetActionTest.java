@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.squareup.picasso3;
+package com.squareup.picasso;
 
 import android.content.Context;
 import android.content.res.Resources;
@@ -24,76 +24,70 @@ import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
 
 import static android.graphics.Bitmap.Config.ARGB_8888;
-import static com.squareup.picasso3.Picasso.LoadedFrom.MEMORY;
-import static com.squareup.picasso3.TestUtils.NO_EVENT_LISTENERS;
-import static com.squareup.picasso3.TestUtils.NO_HANDLERS;
-import static com.squareup.picasso3.TestUtils.NO_TRANSFORMERS;
-import static com.squareup.picasso3.TestUtils.RESOURCE_ID_1;
-import static com.squareup.picasso3.TestUtils.UNUSED_CALL_FACTORY;
-import static com.squareup.picasso3.TestUtils.makeBitmap;
-import static com.squareup.picasso3.TestUtils.mockTarget;
+import static com.squareup.picasso.Picasso.LoadedFrom.MEMORY;
+import static com.squareup.picasso.Picasso.RequestTransformer.IDENTITY;
+import static com.squareup.picasso.TestUtils.RESOURCE_ID_1;
+import static com.squareup.picasso.TestUtils.URI_KEY_1;
+import static com.squareup.picasso.TestUtils.makeBitmap;
+import static com.squareup.picasso.TestUtils.mockTarget;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @RunWith(RobolectricTestRunner.class)
-public class BitmapTargetActionTest {
+public class TargetActionTest {
 
   @Test(expected = AssertionError.class)
-  public void throwsErrorWithNullResult() {
-    BitmapTarget target = mockTarget();
-    BitmapTargetAction request =
-        new BitmapTargetAction(mock(Picasso.class), target, null, null, 0);
-    request.complete(null);
+  public void throwsErrorWithNullResult() throws Exception {
+    TargetAction request =
+        new TargetAction(mock(Picasso.class), mockTarget(), null, 0, 0, null, URI_KEY_1, null, 0);
+    request.complete(null, MEMORY);
   }
 
   @Test
-  public void invokesSuccessIfTargetIsNotNull() {
+  public void invokesSuccessIfTargetIsNotNull() throws Exception {
     Bitmap bitmap = makeBitmap();
-    BitmapTarget target = mockTarget();
-    BitmapTargetAction request =
-        new BitmapTargetAction(mock(Picasso.class), target, null, null, 0);
-    request.complete(new RequestHandler.Result(bitmap, MEMORY));
+    Target target = mockTarget();
+    TargetAction request =
+        new TargetAction(mock(Picasso.class), target, null, 0, 0, null, URI_KEY_1, null, 0);
+    request.complete(bitmap, MEMORY);
     verify(target).onBitmapLoaded(bitmap, MEMORY);
   }
 
   @Test
-  public void invokesOnBitmapFailedIfTargetIsNotNullWithErrorDrawable() {
+  public void invokesOnBitmapFailedIfTargetIsNotNullWithErrorDrawable() throws Exception {
     Drawable errorDrawable = mock(Drawable.class);
-    BitmapTarget target = mockTarget();
-    BitmapTargetAction request = new BitmapTargetAction(mock(Picasso.class), target, null, errorDrawable, 0);
+    Target target = mockTarget();
+    TargetAction request =
+        new TargetAction(mock(Picasso.class), target, null, 0, 0, errorDrawable, URI_KEY_1, null,
+            0);
     Exception e = new RuntimeException();
-
     request.error(e);
-
     verify(target).onBitmapFailed(e, errorDrawable);
   }
 
   @Test
-  public void invokesOnBitmapFailedIfTargetIsNotNullWithErrorResourceId() {
+  public void invokesOnBitmapFailedIfTargetIsNotNullWithErrorResourceId() throws Exception {
     Drawable errorDrawable = mock(Drawable.class);
-    BitmapTarget target = mockTarget();
+    Target target = mockTarget();
     Context context = mock(Context.class);
-    Dispatcher dispatcher = mock(Dispatcher.class);
-    PlatformLruCache cache = new PlatformLruCache(0);
     Picasso picasso =
-        new Picasso(context, dispatcher, UNUSED_CALL_FACTORY, null, cache, null, NO_TRANSFORMERS,
-            NO_HANDLERS, NO_EVENT_LISTENERS, ARGB_8888, false, false);
+        new Picasso(context, mock(Dispatcher.class), Cache.NONE, null, IDENTITY, null,
+            mock(Stats.class), ARGB_8888, false, false);
     Resources res = mock(Resources.class);
-    BitmapTargetAction request = new BitmapTargetAction(picasso, target, null, null, RESOURCE_ID_1);
+    TargetAction request =
+        new TargetAction(picasso, target, null, 0, 0, null, URI_KEY_1, null, RESOURCE_ID_1);
 
     when(context.getResources()).thenReturn(res);
     when(res.getDrawable(RESOURCE_ID_1)).thenReturn(errorDrawable);
     Exception e = new RuntimeException();
-
     request.error(e);
-
     verify(target).onBitmapFailed(e, errorDrawable);
   }
 
   @Test public void recyclingInSuccessThrowsException() {
-    BitmapTarget bad = new BitmapTarget() {
+    Target bad = new Target() {
       @Override public void onBitmapLoaded(Bitmap bitmap, Picasso.LoadedFrom from) {
         bitmap.recycle();
       }
@@ -107,10 +101,11 @@ public class BitmapTargetActionTest {
       }
     };
     Picasso picasso = mock(Picasso.class);
+
     Bitmap bitmap = makeBitmap();
-    BitmapTargetAction tr = new BitmapTargetAction(picasso, bad, null, null, 0);
+    TargetAction tr = new TargetAction(picasso, bad, null, 0, 0, null, URI_KEY_1, null, 0);
     try {
-      tr.complete(new RequestHandler.Result(bitmap, MEMORY));
+      tr.complete(bitmap, MEMORY);
       fail();
     } catch (IllegalStateException ignored) {
     }

@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.squareup.picasso3;
+package com.squareup.picasso;
 
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -23,18 +23,18 @@ import org.robolectric.RobolectricTestRunner;
 
 import static android.graphics.Bitmap.Config.RGB_565;
 import static com.google.common.truth.Truth.assertThat;
-import static com.squareup.picasso3.BitmapUtils.calculateInSampleSize;
-import static com.squareup.picasso3.BitmapUtils.createBitmapOptions;
-import static com.squareup.picasso3.BitmapUtils.requiresInSampleSize;
-import static com.squareup.picasso3.TestUtils.URI_1;
+import static com.squareup.picasso.RequestHandler.calculateInSampleSize;
+import static com.squareup.picasso.RequestHandler.createBitmapOptions;
+import static com.squareup.picasso.RequestHandler.requiresInSampleSize;
+import static com.squareup.picasso.TestUtils.URI_1;
 
 @RunWith(RobolectricTestRunner.class)
-public class BitmapUtilsTest {
+public class RequestHandlerTest {
 
-  @Test public void bitmapConfig() {
+  @Test public void bitmapConfig() throws Exception {
     for (Bitmap.Config config : Bitmap.Config.values()) {
       Request data = new Request.Builder(URI_1).config(config).build();
-      Request copy = data.newBuilder().build();
+      Request copy = data.buildUpon().build();
 
       assertThat(createBitmapOptions(data).inPreferredConfig).isSameAs(config);
       assertThat(createBitmapOptions(copy).inPreferredConfig).isSameAs(config);

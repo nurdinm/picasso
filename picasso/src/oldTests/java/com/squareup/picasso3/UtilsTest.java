@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.squareup.picasso3;
+package com.squareup.picasso;
 
 import android.content.res.Resources;
 import java.io.IOException;
@@ -23,38 +23,52 @@ import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
 
 import static com.google.common.truth.Truth.assertThat;
-import static com.squareup.picasso3.TestUtils.RESOURCE_ID_1;
-import static com.squareup.picasso3.TestUtils.RESOURCE_ID_URI;
-import static com.squareup.picasso3.TestUtils.RESOURCE_TYPE_URI;
-import static com.squareup.picasso3.TestUtils.URI_1;
-import static com.squareup.picasso3.TestUtils.mockPackageResourceContext;
-import static com.squareup.picasso3.Utils.isWebPFile;
+import static com.squareup.picasso.TestUtils.RESOURCE_ID_1;
+import static com.squareup.picasso.TestUtils.RESOURCE_ID_URI;
+import static com.squareup.picasso.TestUtils.RESOURCE_TYPE_URI;
+import static com.squareup.picasso.TestUtils.URI_1;
+import static com.squareup.picasso.TestUtils.mockPackageResourceContext;
+import static com.squareup.picasso.Utils.createKey;
+import static com.squareup.picasso.Utils.isWebPFile;
 
 @RunWith(RobolectricTestRunner.class)
 public class UtilsTest {
 
-  @Test public void matchingRequestsHaveSameKey() {
+  @Test public void matchingRequestsHaveSameKey() throws Exception {
     Request request = new Request.Builder(URI_1).build();
-    Request request2 = new Request.Builder(URI_1).build();
-    assertThat(request.key).isEqualTo(request2.key);
+    String key1 = createKey(request);
+    String key2 = createKey(request);
+    assertThat(key1).isEqualTo(key2);
 
     Transformation t1 = new TestTransformation("foo", null);
     Transformation t2 = new TestTransformation("foo", null);
+
     Request requestTransform1 = new Request.Builder(URI_1).transform(t1).build();
     Request requestTransform2 = new Request.Builder(URI_1).transform(t2).build();
-    assertThat(requestTransform1.key).isEqualTo(requestTransform2.key);
+
+    String single1 = createKey(requestTransform1);
+    String single2 = createKey(requestTransform2);
+    assertThat(single1).isEqualTo(single2);
 
     Transformation t3 = new TestTransformation("foo", null);
     Transformation t4 = new TestTransformation("bar", null);
+
     Request requestTransform3 = new Request.Builder(URI_1).transform(t3).transform(t4).build();
     Request requestTransform4 = new Request.Builder(URI_1).transform(t3).transform(t4).build();
-    assertThat(requestTransform3.key).isEqualTo(requestTransform4.key);
+
+    String double1 = createKey(requestTransform3);
+    String double2 = createKey(requestTransform4);
+    assertThat(double1).isEqualTo(double2);
 
     Transformation t5 = new TestTransformation("foo", null);
     Transformation t6 = new TestTransformation("bar", null);
+
     Request requestTransform5 = new Request.Builder(URI_1).transform(t5).transform(t6).build();
     Request requestTransform6 = new Request.Builder(URI_1).transform(t6).transform(t5).build();
-    assertThat(requestTransform5.key).isNotEqualTo(requestTransform6.key);
+
+    String order1 = createKey(requestTransform5);
+    String order2 = createKey(requestTransform6);
+    assertThat(order1).isNotEqualTo(order2);
   }
 
   @Test public void detectedWebPFile() throws Exception {
@@ -65,10 +79,12 @@ public class UtilsTest {
     assertThat(isWebPFile(new Buffer().writeUtf8("RIFFxxWEBP"))).isFalse();
   }
 
-  @Test public void ensureBuilderIsCleared() {
-    new Request.Builder(RESOURCE_ID_URI).build();
+  @Test public void ensureBuilderIsCleared() throws Exception {
+    Request request1 = new Request.Builder(RESOURCE_ID_URI).build();
+    Request request2 = new Request.Builder(URI_1).build();
+    Utils.createKey(request1);
     assertThat(Utils.MAIN_THREAD_KEY_BUILDER.length()).isEqualTo(0);
-    new Request.Builder(URI_1).build();
+    Utils.createKey(request2);
     assertThat(Utils.MAIN_THREAD_KEY_BUILDER.length()).isEqualTo(0);
   }
 

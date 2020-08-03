@@ -13,14 +13,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.squareup.picasso3;
+package com.squareup.picasso;
 
 import android.graphics.Bitmap;
 import android.widget.ImageView;
 import android.widget.RemoteViews;
-import androidx.annotation.DrawableRes;
-import androidx.annotation.NonNull;
-import com.squareup.picasso3.RemoteViewsAction.RemoteViewsTarget;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -29,22 +26,19 @@ import org.robolectric.RuntimeEnvironment;
 
 import static android.graphics.Bitmap.Config.ARGB_8888;
 import static com.google.common.truth.Truth.assertThat;
-import static com.squareup.picasso3.Picasso.LoadedFrom.NETWORK;
-import static com.squareup.picasso3.TestUtils.NO_EVENT_LISTENERS;
-import static com.squareup.picasso3.TestUtils.NO_HANDLERS;
-import static com.squareup.picasso3.TestUtils.NO_TRANSFORMERS;
-import static com.squareup.picasso3.TestUtils.UNUSED_CALL_FACTORY;
-import static com.squareup.picasso3.TestUtils.makeBitmap;
-import static com.squareup.picasso3.TestUtils.mockCallback;
-import static com.squareup.picasso3.TestUtils.mockImageViewTarget;
+import static com.squareup.picasso.Picasso.LoadedFrom.NETWORK;
+import static com.squareup.picasso.Picasso.RequestTransformer.IDENTITY;
+import static com.squareup.picasso.TestUtils.URI_KEY_1;
+import static com.squareup.picasso.TestUtils.makeBitmap;
+import static com.squareup.picasso.TestUtils.mockCallback;
+import static com.squareup.picasso.TestUtils.mockImageViewTarget;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyZeroInteractions;
 import static org.mockito.Mockito.when;
 
-@RunWith(RobolectricTestRunner.class) //
+@RunWith(RobolectricTestRunner.class)
 public class RemoteViewsActionTest {
-
   private Picasso picasso;
   private RemoteViews remoteViews;
 
@@ -54,16 +48,16 @@ public class RemoteViewsActionTest {
     when(remoteViews.getLayoutId()).thenReturn(android.R.layout.list_content);
   }
 
-  @Test public void completeSetsBitmapOnRemoteViews() {
+  @Test public void completeSetsBitmapOnRemoteViews() throws Exception {
     Callback callback = mockCallback();
     Bitmap bitmap = makeBitmap();
     RemoteViewsAction action = createAction(callback);
-    action.complete(new RequestHandler.Result(bitmap, NETWORK));
+    action.complete(bitmap, NETWORK);
     verify(remoteViews).setImageViewBitmap(1, bitmap);
     verify(callback).onSuccess();
   }
 
-  @Test public void errorWithNoResourceIsNoop() {
+  @Test public void errorWithNoResourceIsNoop() throws Exception {
     Callback callback = mockCallback();
     RemoteViewsAction action = createAction(callback);
     Exception e = new RuntimeException();
@@ -72,7 +66,7 @@ public class RemoteViewsActionTest {
     verify(callback).onError(e);
   }
 
-  @Test public void errorWithResourceSetsResource() {
+  @Test public void errorWithResourceSetsResource() throws Exception {
     Callback callback = mockCallback();
     RemoteViewsAction action = createAction(1, callback);
     Exception e = new RuntimeException();
@@ -81,12 +75,12 @@ public class RemoteViewsActionTest {
     verify(callback).onError(e);
   }
 
-  @Test public void clearsCallbackOnCancel() {
+  @Test public void clearsCallbackOnCancel() throws Exception {
     Picasso picasso = mock(Picasso.class);
     ImageView target = mockImageViewTarget();
     Callback callback = mockCallback();
     ImageViewAction request =
-        new ImageViewAction(picasso, target, null, null, 0, false, callback);
+        new ImageViewAction(picasso, target, null, 0, 0, 0, null, URI_KEY_1, null, callback, false);
     request.cancel();
     assertThat(request.callback).isNull();
   }
@@ -96,28 +90,24 @@ public class RemoteViewsActionTest {
   }
 
   private TestableRemoteViewsAction createAction(int errorResId, Callback callback) {
-    return new TestableRemoteViewsAction(picasso, null, errorResId,
-        new RemoteViewsTarget(remoteViews, 1), callback);
+    return new TestableRemoteViewsAction(picasso, null, remoteViews, 1, errorResId, 0, 0, null,
+        URI_KEY_1, callback);
   }
 
   private Picasso createPicasso() {
-    Dispatcher dispatcher = mock(Dispatcher.class);
-    PlatformLruCache cache = new PlatformLruCache(0);
-    return new Picasso(RuntimeEnvironment.application, dispatcher, UNUSED_CALL_FACTORY, null, cache,
-        null, NO_TRANSFORMERS, NO_HANDLERS, NO_EVENT_LISTENERS, ARGB_8888, false, false);
+    return new Picasso(RuntimeEnvironment.application, mock(Dispatcher.class), Cache.NONE, null,
+        IDENTITY, null, mock(Stats.class), ARGB_8888, false, false);
   }
 
   static class TestableRemoteViewsAction extends RemoteViewsAction {
-    TestableRemoteViewsAction(Picasso picasso, Request data, @DrawableRes int errorResId,
-        RemoteViewsTarget target, Callback callback) {
-      super(picasso, data, errorResId, target, callback);
+    TestableRemoteViewsAction(Picasso picasso, Request data, RemoteViews remoteViews, int viewId,
+        int errorResId, int memoryPolicy, int networkPolicy, String tag, String key,
+        Callback callback) {
+      super(picasso, data, remoteViews, viewId, errorResId, memoryPolicy, networkPolicy, tag, key,
+          callback);
     }
 
     @Override void update() {
-    }
-
-    @NonNull @Override Object getTarget() {
-      throw new AssertionError();
     }
   }
 }
