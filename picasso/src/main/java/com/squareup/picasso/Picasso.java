@@ -20,6 +20,7 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
@@ -32,12 +33,22 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import java.io.File;
 import java.lang.ref.ReferenceQueue;
+import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
 import java.util.concurrent.ExecutorService;
+
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
+
+import okhttp3.OkHttpClient;
 
 import static android.os.Process.THREAD_PRIORITY_BACKGROUND;
 import static com.squareup.picasso.Action.RequestWeakReference;
@@ -845,7 +856,11 @@ public class Picasso {
       Context context = this.context;
 
       if (downloader == null) {
-        downloader = new OkHttp3Downloader(context);
+        if (Build.VERSION.SDK_INT < 24) {
+          downloader = new OkHttp3Downloader(getUnsafeOkHttpClient());
+        }else {
+          downloader = new OkHttp3Downloader(context);
+        }
       }
       if (cache == null) {
         cache = new LruCache(context);
@@ -877,5 +892,42 @@ public class Picasso {
     LoadedFrom(int debugColor) {
       this.debugColor = debugColor;
     }
+  }
+
+  public static OkHttpClient getUnsafeOkHttpClient() {
+    OkHttpClient.Builder builder = new OkHttpClient.Builder();
+    try {
+      final TrustManager[] trustAllCerts = new TrustManager[]{
+              new X509TrustManager() {
+                @Override
+                public void checkClientTrusted(X509Certificate[] chain, String authType) {
+                }
+
+                @Override
+                public void checkServerTrusted(X509Certificate[] chain, String authType) {
+                }
+
+                @Override
+                public X509Certificate[] getAcceptedIssuers() {
+                  return new X509Certificate[]{};
+                }
+              }
+      };
+      final SSLContext sslContext = SSLContext.getInstance("SSL");
+      sslContext.init(null, trustAllCerts, new java.security.SecureRandom());
+      final SSLSocketFactory sslSocketFactory = sslContext.getSocketFactory();
+      builder.sslSocketFactory(sslSocketFactory, (X509TrustManager) trustAllCerts[0]);
+      builder.hostnameVerifier(new HostnameVerifier() {
+        @SuppressLint("BadHostnameVerifier")
+        @Override
+        public boolean verify(String hostname, SSLSession session) {
+          return true;
+        }
+      });
+
+    } catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+    return builder.build();
   }
 }
