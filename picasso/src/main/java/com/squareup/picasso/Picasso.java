@@ -856,7 +856,7 @@ public class Picasso {
       Context context = this.context;
 
       if (downloader == null) {
-        if (Build.VERSION.SDK_INT < 24) {
+        if (Build.VERSION.SDK_INT < 25) {
           downloader = new OkHttp3Downloader(getUnsafeOkHttpClient());
         }else {
           downloader = new OkHttp3Downloader(context);
